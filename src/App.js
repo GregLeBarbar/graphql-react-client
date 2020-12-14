@@ -16,7 +16,10 @@ const axiosGitHubGraphQL = axios.create({
  * Query to select the 5 latest issues of repository of organization
  */
 const GET_ISSUES_OF_REPOSITORY = `
-  query ($organization: String!, $repository: String!) {
+  query (
+    $organization: String!, 
+    $repository: String!,
+    $cursor: String) {
     organization(login: $organization) {
       name
       url
@@ -24,13 +27,26 @@ const GET_ISSUES_OF_REPOSITORY = `
       repository(name: $repository) {
         name
         url
-        issues(last: 5) {
+        issues(first: 5,after: $cursor, states: [OPEN]) {
           edges {
             node {
               id
               title
               url
+              reactions(last: 3) {
+                edges {
+                  node {
+                    id
+                    content
+                  }
+                }
+              }
             }
+          }
+          totalCount
+          pageInfo {
+            endCursor
+            hasNextPage
           }
         }
       }
@@ -43,12 +59,12 @@ const GET_ISSUES_OF_REPOSITORY = `
  * 
  * @param path qui doit respecter le format "organisation/repository"
  */
-const getIssuesOfRepository = path => {
+const getIssuesOfRepository = (path, cursor) => {
   const [organization, repository] = path.split('/');
 
   return axiosGitHubGraphQL.post('', { 
     query: GET_ISSUES_OF_REPOSITORY,
-    variables: { organization, repository }, 
+    variables: { organization, repository, cursor }, 
   });
 }
 
@@ -56,10 +72,38 @@ const getIssuesOfRepository = path => {
  * A partir du résulat de la requête, extrait l'organisation (ou les erreurs en cas de problème)
  * @param {*} queryResult 
  */
-const resolveIssuesQuery = queryResult => () => ({
-  organization: queryResult.data.data.organization,
-  errors: queryResult.data.errors,
-})
+const resolveIssuesQuery = (queryResult, cursor) => (state) => {
+  const { data, errors } = queryResult.data;
+
+  if (!cursor) {
+    return {
+      organization: data.organization,  
+      errors: errors  
+    }
+  }
+
+  // les anciennes issues sont le state
+  // les nouvelles dans le résulat de la requete
+  // on merge les issues dans un tableau
+  const { edges: oldIssues } = state.organization.repository.issues;
+  const { edges: newIssues } = data.organization.repository.issues;
+  const updatedIssues = [...oldIssues, ...newIssues];
+
+  // 
+  return {
+    organization: {
+      ...data.organization,
+      repository: {
+        ...data.organization.repository,
+        issues: {
+          ...data.organization.repository.issues,
+          edges: updatedIssues,
+        },
+      },
+    },
+    errors,
+  };
+};
 
 
 class App extends Component {
@@ -84,11 +128,19 @@ class App extends Component {
     event.preventDefault();
   }
 
-  onFetchFromGithub = (path) => {
-    getIssuesOfRepository(path).then(queryResult => {
+  onFetchFromGithub = (path, cursor) => {
+    getIssuesOfRepository(path, cursor).then(queryResult => {
       console.log(queryResult);
-      this.setState(resolveIssuesQuery(queryResult))
+      this.setState(resolveIssuesQuery(queryResult, cursor))
     });
+  }
+
+  onFetchMoreIssues = () => {
+    const {
+      endCursor,
+    } = this.state.organization.repository.issues.pageInfo;
+
+    this.onFetchFromGithub(this.state.path, endCursor);
   }
 
   render() {
@@ -114,7 +166,11 @@ class App extends Component {
         </form>
         <hr />
         {organization ? (
-          <Organization organization={organization} errors={errors} />
+          <Organization 
+            organization={organization} 
+            errors={errors}
+            onFetchMoreIssues={this.onFetchMoreIssues}
+          />
         ) : (
           <p>No information yet ...</p>
         )}
@@ -123,7 +179,11 @@ class App extends Component {
   }
 }
 
-const Organization = ({ organization, errors }) => {
+const Organization = ({ 
+  organization, 
+  errors,
+  onFetchMoreIssues,
+}) => {
   if (errors) {
     return (
       <p>
@@ -139,12 +199,15 @@ const Organization = ({ organization, errors }) => {
         <a href={organization.url}>{organization.name}</a>&nbsp;
         <img src={organization.avatarUrl} width="50" style={{verticalAlign: "middle" }} />
       </p>
-      <Repository repository={organization.repository} />
+      <Repository 
+        repository={organization.repository}
+        onFetchMoreIssues={onFetchMoreIssues}
+      />
     </div>
   );
 };
 
-const Repository = ({ repository }) => (
+const Repository = ({ repository, onFetchMoreIssues }) => (
   <div>
     <p>
       <strong>In Repository:</strong>&nbsp;
@@ -154,10 +217,27 @@ const Repository = ({ repository }) => (
       {repository.issues.edges.map(issue => (
         <li key={issue.node.id}>
           <a href={issue.node.url}>{issue.node.title}</a>
+          <ReactionsList reactions={issue.node.reactions} />
         </li>
       ))}
     </ul>
+    <hr />
+    { repository.issues.pageInfo.hasNextPage && (
+      <button onClick={onFetchMoreIssues}>More</button>
+    )}
   </div>
 );
+
+const ReactionsList = ({ reactions }) => (
+  <ul>
+    {reactions.edges.map(reaction => (
+      <ReactionItem key={reaction.node.id} reaction={reaction} />
+    ))}
+  </ul>
+)
+
+const ReactionItem = ({reaction}) => (
+  <li key={reaction.node.id}>{reaction.node.content}</li>
+)
 
 export default App;
